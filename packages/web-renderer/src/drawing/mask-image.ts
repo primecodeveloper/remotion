@@ -1,6 +1,12 @@
 import {parseLengthPercentage} from './background-image-rect';
-import type {LinearGradientInfo} from './parse-linear-gradient';
-import {parseLinearGradient} from './parse-linear-gradient';
+import type {
+	LinearGradientInfo,
+	RadialGradientInfo,
+} from './parse-linear-gradient';
+import {
+	parseLinearGradient,
+	parseRadialGradient,
+} from './parse-linear-gradient';
 
 type LinearGradientMaskImageInfo = {
 	type: 'linear-gradient';
@@ -14,7 +20,10 @@ export type UrlMaskImageInfo = {
 	maskRepeat: string;
 };
 
-export type MaskImageInfo = LinearGradientMaskImageInfo | UrlMaskImageInfo;
+export type MaskImageInfo =
+	| LinearGradientMaskImageInfo
+	| UrlMaskImageInfo
+	| {type: 'radial-gradient'; gradientInfo: RadialGradientInfo};
 
 export const getMaskImageValue = (
 	computedStyle: CSSStyleDeclaration,
@@ -191,12 +200,22 @@ const validateUrlMaskImageStyle = (computedStyle: CSSStyleDeclaration) => {
 export const parseMaskImage = (
 	maskImageValue: string,
 	computedStyle: CSSStyleDeclaration,
+	experimental3DRendering = false,
 ): MaskImageInfo | null => {
-	const gradientInfo = parseLinearGradient(maskImageValue);
+	const gradientInfo = parseLinearGradient(
+		maskImageValue,
+		experimental3DRendering,
+	);
 	if (gradientInfo) {
 		return {type: 'linear-gradient', gradientInfo};
 	}
 
+	const radialGradientInfo = parseRadialGradient(
+		maskImageValue,
+		experimental3DRendering,
+	);
+	if (experimental3DRendering && radialGradientInfo)
+		return {type: 'radial-gradient', gradientInfo: radialGradientInfo};
 	const url = parseUrlFunction(maskImageValue);
 	if (url !== null) {
 		if (!url) {

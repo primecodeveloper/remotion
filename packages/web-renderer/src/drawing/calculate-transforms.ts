@@ -55,16 +55,41 @@ export const getBlendMode = (
 	}
 };
 
+export const preserves3DChildren = (computedStyle: CSSStyleDeclaration) =>
+	computedStyle.transformStyle === 'preserve-3d' &&
+	computedStyle.opacity === '1' &&
+	(computedStyle.overflowX === 'visible' ||
+		computedStyle.overflowX === 'clip') &&
+	(computedStyle.overflowY === 'visible' ||
+		computedStyle.overflowY === 'clip') &&
+	computedStyle.filter === 'none' &&
+	!getMaskImageValue(computedStyle) &&
+	computedStyle.clip === 'auto' &&
+	computedStyle.clipPath === 'none' &&
+	computedStyle.isolation !== 'isolate' &&
+	computedStyle.mixBlendMode === 'normal' &&
+	(!computedStyle.getPropertyValue('mask-border-source') ||
+		computedStyle.getPropertyValue('mask-border-source') === 'none') &&
+	!/(?:paint|strict|content)/.test(computedStyle.contain) &&
+	computedStyle.contentVisibility === 'visible';
 type Transform = {
 	matrices: DOMMatrix[];
 	element: Element;
 	transformOrigin: string;
+	perspective: string | null;
+	perspectiveOrigin: string;
 	boundingClientRect: DOMRect | null;
 };
 
 type TransformStyle = Pick<
 	CSSStyleDeclaration,
-	'display' | 'rotate' | 'scale' | 'transform' | 'transformOrigin'
+	| 'display'
+	| 'rotate'
+	| 'scale'
+	| 'transform'
+	| 'transformOrigin'
+	| 'perspective'
+	| 'perspectiveOrigin'
 >;
 
 export type TransformStyleCache = WeakMap<Element, TransformStyle>;
@@ -78,6 +103,8 @@ const snapshotTransformStyle = (
 		scale: computedStyle.scale,
 		transform: computedStyle.transform,
 		transformOrigin: computedStyle.transformOrigin,
+		perspective: computedStyle.perspective,
+		perspectiveOrigin: computedStyle.perspectiveOrigin,
 	};
 };
 
@@ -95,7 +122,7 @@ const isReplacedElement = (element: Element) => {
 	);
 };
 
-const canApplyCssTransforms = ({
+export const canApplyCssTransforms = ({
 	element,
 	computedStyle,
 }: {
@@ -113,12 +140,17 @@ const canApplyCssTransforms = ({
 	return isReplacedElement(element);
 };
 
-const makeTransformResetter = (element: HTMLElement | SVGElement) => {
+const makeTransformResetter = (
+	element: HTMLElement | SVGElement,
+	experimental3DRendering: boolean,
+) => {
 	const {transform, scale, rotate} = element.style;
 
 	return (hasApplicableTransformCssValue: boolean) => {
 		if (hasApplicableTransformCssValue) {
-			element.style.transform = 'none';
+			element.style.transform = experimental3DRendering
+				? 'matrix(1, 0, 0, 1, 0, 0)'
+				: 'none';
 			element.style.scale = 'none';
 			element.style.rotate = 'none';
 		}
@@ -159,11 +191,13 @@ export const calculateTransforms = ({
 	rootElement,
 	transformStyleCache,
 	isolated,
+	experimental3DRendering = false,
 }: {
 	element: HTMLElement | SVGElement;
 	rootElement: HTMLElement | SVGElement;
 	transformStyleCache: TransformStyleCache;
 	isolated: boolean;
+	experimental3DRendering?: boolean;
 }) => {
 	// Compute the cumulative transform by traversing parent nodes
 	let parent: HTMLElement | SVGElement | null = element;
@@ -171,6 +205,8 @@ export const calculateTransforms = ({
 	const toReset: (() => void)[] = [];
 
 	let opacity = 1;
+	let elementPreserves3D = false;
+	let elementHadGroupedPreserve3D = false;
 	let elementComputedStyle: CSSStyleDeclaration | null = null;
 	let maskImageInfo: MaskImageInfo | null = null;
 	let filterForPrecompositing: string | null = null;
@@ -206,10 +242,36 @@ export const calculateTransforms = ({
 			}
 
 			elementComputedStyle = computedStyle;
+			elementPreserves3D =
+				experimental3DRendering && preserves3DChildren(computedStyle);
+			elementHadGroupedPreserve3D =
+				experimental3DRendering &&
+				!elementPreserves3D &&
+				computedStyle.transformStyle === 'preserve-3d';
+			if (elementHadGroupedPreserve3D) {
+				const originalTransformStyle = parent.style.transformStyle;
+				const groupParent = parent;
+				// Removing a grouping effect for its temporary layer must not change
+				// the element's used transform-style from flat back to preserve-3d.
+				parent.style.transformStyle = 'flat';
+				toReset.push(() => {
+					groupParent.style.transformStyle = originalTransformStyle;
+				});
+			}
+
 			opacity = parseFloat(computedStyle.opacity);
+			if (experimental3DRendering && opacity > 0 && opacity < 1) {
+				const ungroupedOpacity = parent.style.opacity;
+				const groupParent = parent;
+				parent.style.opacity = '1';
+				toReset.push(() => {
+					groupParent.style.opacity = ungroupedOpacity;
+				});
+			}
+
 			const maskImageValue = getMaskImageValue(computedStyle);
 			maskImageInfo = maskImageValue
-				? parseMaskImage(maskImageValue, computedStyle)
+				? parseMaskImage(maskImageValue, computedStyle, experimental3DRendering)
 				: null;
 
 			blendMode = getBlendMode(computedStyle.mixBlendMode);
@@ -256,18 +318,40 @@ export const calculateTransforms = ({
 			});
 		}
 
+		// The perspective property projects children, not the element's own plane.
+		const hasPerspective =
+			experimental3DRendering &&
+			parent !== element &&
+			canApplyCssTransforms({computedStyle: transformStyle, element: parent}) &&
+			transformStyle.perspective &&
+			transformStyle.perspective !== 'none';
+		const originalPerspective = parent.style.perspective;
+		if (hasPerspective) {
+			parent.style.perspective = 'none';
+			const parentRef = parent;
+			toReset.push(() => {
+				parentRef.style.perspective = originalPerspective;
+			});
+		}
+
 		const hasApplicableTransformCssValue =
 			canApplyCssTransforms({computedStyle: transformStyle, element: parent}) &&
 			hasAnyTransformCssValue(transformStyle);
-
-		if (hasApplicableTransformCssValue || parent === element) {
+		if (
+			hasApplicableTransformCssValue ||
+			hasPerspective ||
+			parent === element
+		) {
 			const toParse =
 				hasApplicableTransformCssValue && hasTransformCssValue(transformStyle)
 					? transformStyle.transform
 					: undefined;
 			const matrix = makeDOMMatrix(toParse);
 
-			const resetTransforms = makeTransformResetter(parent);
+			const resetTransforms = makeTransformResetter(
+				parent,
+				experimental3DRendering,
+			);
 			const {scale, rotate} = parent.style;
 			const additionalMatrices: DOMMatrix[] = [];
 
@@ -289,12 +373,16 @@ export const calculateTransforms = ({
 			}
 
 			additionalMatrices.push(matrix);
-
-			const cleanup = resetTransforms(hasApplicableTransformCssValue);
-
+			const cleanup = resetTransforms(
+				hasApplicableTransformCssValue ||
+					hasPerspective ||
+					(parent === element && elementHadGroupedPreserve3D),
+			);
 			transforms.push({
 				element: parent,
 				transformOrigin: transformStyle.transformOrigin,
+				perspective: hasPerspective ? transformStyle.perspective : null,
+				perspectiveOrigin: transformStyle.perspectiveOrigin,
 				boundingClientRect: null,
 				matrices: additionalMatrices,
 			});
@@ -338,18 +426,36 @@ export const calculateTransforms = ({
 
 			totalMatrix.multiplySelf(transformMatrix);
 		}
+
+		if (transform.perspective) {
+			const origin = parseTransformOrigin(transform.perspectiveOrigin) ?? {
+				x: transform.boundingClientRect!.width / 2,
+				y: transform.boundingClientRect!.height / 2,
+			};
+			const x = transform.boundingClientRect!.left + origin.x;
+			const y = transform.boundingClientRect!.top + origin.y;
+			// CSS clamps perspective distances below 1px to 1px for rendering.
+			const projection = new DOMMatrix();
+			projection.m34 = -1 / Math.max(1, parseFloat(transform.perspective));
+			totalMatrix.multiplySelf(
+				new DOMMatrix().translate(x, y).multiply(projection).translate(-x, -y),
+			);
+		}
 	}
 
 	if (!elementComputedStyle) {
 		throw new Error('Element computed style not found');
 	}
 
+	const needsOpacityPrecompositing =
+		experimental3DRendering && opacity > 0 && opacity < 1;
 	const needs3DTransformViaWebGL = !totalMatrix.is2D;
 	const needsMaskImage = maskImageInfo !== null;
 	const needsFilterPrecompositing = filterForPrecompositing !== null;
 
 	return {
 		dimensions,
+		preserves3DChildren: elementPreserves3D,
 		totalMatrix,
 		[Symbol.dispose]: () => {
 			for (const reset of toReset) {
@@ -362,6 +468,7 @@ export const calculateTransforms = ({
 		maskImageInfo,
 		precompositing: {
 			needs3DTransformViaWebGL,
+			needsOpacityPrecompositing,
 			needsMaskImage: maskImageInfo,
 			needsFilterPrecompositing: filterForPrecompositing,
 			needsBlendMode: blendMode,
@@ -370,6 +477,7 @@ export const calculateTransforms = ({
 				needs3DTransformViaWebGL ||
 				needsMaskImage ||
 				needsFilterPrecompositing ||
+				needsOpacityPrecompositing ||
 				blendMode !== null ||
 				isolated,
 			),

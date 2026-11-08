@@ -74,6 +74,7 @@ export const drawElement = async ({
 		rect,
 		borderRadius,
 		logLevel,
+		experimental3DRendering: internalState.experimental3DRendering,
 	});
 	const finishBorderRadius = setBorderRadius({
 		ctx: context,
@@ -99,6 +100,15 @@ export const drawElement = async ({
 		scale,
 	});
 
+	drawBorderRadius({
+		ctx: context,
+		computedStyle,
+		rect,
+		borderRadius,
+		logLevel,
+		inset: true,
+		experimental3DRendering: internalState.experimental3DRendering,
+	});
 	await draw({dimensions: rect, computedStyle, contextToDraw: context});
 
 	finishBorderRadius();

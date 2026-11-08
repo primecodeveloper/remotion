@@ -1,8 +1,11 @@
 import {getBiggestBoundingClientRect} from '../get-biggest-bounding-client-rect';
 import type {InternalState} from '../internal-state';
-import {getBackgroundImageRect} from './background-image-rect';
+import {resolveSize} from './background-image-rect';
 import type {MaskImageInfo} from './mask-image';
-import {createCanvasGradient} from './parse-linear-gradient';
+import {
+	createCanvasGradient,
+	createRadialGradientFill,
+} from './parse-linear-gradient';
 import {getRasterImage} from './raster-image-loader';
 
 export const getPrecomposeRectForMask = (element: HTMLElement | SVGElement) => {
@@ -53,18 +56,67 @@ export const handleMask = async ({
 		return;
 	}
 
+	if (maskImageInfo.type === 'radial-gradient') {
+		const fill = createRadialGradientFill({
+			gradientInfo: maskImageInfo.gradientInfo,
+			experimental3DRendering: internalState.experimental3DRendering,
+			contextToDraw: tempContext,
+			rect: rectToFill,
+			offsetLeft: 0,
+			offsetTop: 0,
+		});
+		if (!fill) {
+			tempContext.clearRect(
+				0,
+				0,
+				tempContext.canvas.width,
+				tempContext.canvas.height,
+			);
+			return;
+		}
+
+		tempContext.globalCompositeOperation = 'destination-in';
+		tempContext.fillStyle = fill;
+		tempContext.fillRect(
+			rectToFill.left,
+			rectToFill.top,
+			rectToFill.width,
+			rectToFill.height,
+		);
+		return;
+	}
+
 	const image = await getRasterImage({
 		src: maskImageInfo.src,
 		sourceProperty: 'mask-image',
 		state: internalState.rasterImageLoaderState,
 	});
 	const {maskSize, maskRepeat} = maskImageInfo;
-	const {width, height} = getBackgroundImageRect({
-		backgroundSize: maskSize,
-		backgroundPosition: '0% 0%',
-		positioningArea: maskRect,
-		intrinsicSize: image,
-	});
+	let width: number;
+	let height: number;
+	if (maskSize === 'contain' || maskSize === 'cover') {
+		const factor = (maskSize === 'contain' ? Math.min : Math.max)(
+			maskRect.width / image.width,
+			maskRect.height / image.height,
+		);
+		width = image.width * factor;
+		height = image.height * factor;
+	} else {
+		const [x, y = 'auto'] = maskSize.split(' ');
+		if (x === 'auto' && y === 'auto') {
+			width = image.width;
+			height = image.height;
+		} else if (x === 'auto') {
+			height = resolveSize({containerSize: maskRect.height, value: y});
+			width = (height * image.width) / image.height;
+		} else {
+			width = resolveSize({containerSize: maskRect.width, value: x});
+			height =
+				y === 'auto'
+					? (width * image.height) / image.width
+					: resolveSize({containerSize: maskRect.height, value: y});
+		}
+	}
 
 	tempContext.globalCompositeOperation = 'destination-in';
 	if (width === 0 || height === 0) {
