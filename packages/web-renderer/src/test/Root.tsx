@@ -71,6 +71,7 @@ import {
 	mixBlendModeGroups,
 } from './fixtures/mix-blend-mode';
 import {multiLevelTransformOrigins} from './fixtures/multi-level-transform-origins';
+import {nativeReferenceControl} from './fixtures/native-reference-control';
 import {nestedTranslateScale} from './fixtures/nested-translate-scale';
 import {objectFit} from './fixtures/object-fit';
 import {objectPosition, objectPositionMath} from './fixtures/object-position';
@@ -99,6 +100,8 @@ import {simpleRotatedSvg} from './fixtures/simple-rotated-svg';
 import {stackingContextSiblings} from './fixtures/stacking-context-siblings';
 import {svgDataUri} from './fixtures/svg-data-uri';
 import {svgExplicitDimensions} from './fixtures/svg-explicit-dimensions';
+import {svgExternalFontSelection} from './fixtures/svg-external-font-selection';
+import {svgForeignObjectFont} from './fixtures/svg-foreign-object-font';
 import {svgPreserveAspectRatioNone} from './fixtures/svg-preserve-aspect-ratio-none';
 import {svgUrlNonzeroViewbox} from './fixtures/svg-url-nonzero-viewbox';
 import {backgroundClipText} from './fixtures/text/background-clip-text';
@@ -145,6 +148,7 @@ export const Root: React.FC = () => {
 	return (
 		<>
 			<Composition {...simpleRotatedSvg} />
+			<Composition {...nativeReferenceControl} />
 			<Composition {...parentRotatedSvg} />
 			<Composition {...selfTransformOrigin} />
 			<Composition {...parentTransformOrigin} />
@@ -173,6 +177,8 @@ export const Root: React.FC = () => {
 			<Composition {...nestedTranslateScale} />
 			<Composition {...scaledTranslatedSvg} />
 			<Composition {...svgExplicitDimensions} />
+			<Composition {...svgExternalFontSelection} />
+			<Composition {...svgForeignObjectFont} />
 			<Composition {...svgDataUri} />
 			<Composition {...svgUrlNonzeroViewbox} />
 			<Composition {...svgPreserveAspectRatioNone} />
