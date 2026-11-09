@@ -1,24 +1,38 @@
+import {AbsoluteFill, Img} from 'remotion';
 import {expect, test} from 'vitest';
 import {renderStillOnWeb} from '../render-still-on-web';
 import '../symbol-dispose';
 import {objectPosition, objectPositionMath} from './fixtures/object-position';
+import {
+	replacedElementPixelated,
+	pixelatedReplacedRaster,
+} from './fixtures/replaced-element-pixelated';
+import {svgUrlBlurredCover} from './fixtures/svg-url-nonzero-viewbox';
 import {
 	captureNativeReference,
 	compareNativePixels,
 	savePixelEvidence,
 } from './native-reference';
 
-// KINO-7764: Firefox/WebKit still differ in CSS-vs-canvas image resampling.
-// This qualifies Chromium only; those engine gaps remain open, without tolerance.
+// KINO-7764: the general object-position fixtures still differ in WebKit.
+// The bounded integer pixelated fixture qualifies Chromium and WebKit.
 test
-	.skipIf(!navigator.userAgent.includes('Chrome'))
-	.each(
-		[objectPosition, objectPositionMath].flatMap((fixture) =>
-			[0, 1].map((frame) => ({fixture, frame})),
+	.skipIf(navigator.userAgent.includes('Firefox'))
+	.for(
+		[objectPosition, objectPositionMath, replacedElementPixelated].flatMap(
+			(fixture) => [0, 1].map((frame) => ({fixture, frame})),
 		),
 	)(
-	'Chromium $fixture.id matches native pixels at frame $frame',
-	async ({fixture, frame}) => {
+	'$fixture.id matches native pixels at frame $frame',
+	async ({fixture, frame}, t) => {
+		if (
+			!navigator.userAgent.includes('Chrome') &&
+			fixture !== replacedElementPixelated
+		) {
+			t.skip();
+			return;
+		}
+
 		const reference = await captureNativeReference(fixture, frame);
 		const actual = await (
 			await renderStillOnWeb({
@@ -30,9 +44,113 @@ test
 			})
 		).blob({format: 'png'});
 		const result = await compareNativePixels(reference, actual);
-		await savePixelEvidence(reference, `${fixture.id}-reference-${frame}`);
-		await savePixelEvidence(actual, `${fixture.id}-actual-${frame}`);
-		await savePixelEvidence(result.diff, `${fixture.id}-diff-${frame}`);
+		if (result.mismatchedPixels > 0) {
+			await savePixelEvidence(reference, `${fixture.id}-reference-${frame}`);
+			await savePixelEvidence(actual, `${fixture.id}-actual-${frame}`);
+			await savePixelEvidence(result.diff, `${fixture.id}-diff-${frame}`);
+		}
+
 		expect(result.mismatchedPixels).toBe(0);
 	},
 );
+
+// KINO-7764: a pixelated replaced element must not change the next sibling sampler.
+test('restores sampling before the next replaced element', async () => {
+	const fixture = (pixelated: boolean) => ({
+		component: () => (
+			<AbsoluteFill style={{backgroundColor: 'white'}}>
+				<Img
+					src={pixelatedReplacedRaster}
+					style={{
+						width: 64,
+						height: 64,
+						imageRendering: pixelated ? 'pixelated' : 'auto',
+					}}
+				/>
+				<div
+					style={{
+						position: 'absolute',
+						left: 0,
+						top: 0,
+						width: 64,
+						height: 64,
+						backgroundColor: 'white',
+					}}
+				/>
+				<Img
+					src={pixelatedReplacedRaster}
+					style={{
+						position: 'absolute',
+						left: 72,
+						top: 0,
+						width: 64,
+						height: 64,
+						imageRendering: 'auto',
+					}}
+				/>
+			</AbsoluteFill>
+		),
+		id: 'replaced-sampler-sibling',
+		width: 144,
+		height: 64,
+		fps: 25,
+		durationInFrames: 1,
+	});
+	const render = async (pixelated: boolean) =>
+		(
+			await renderStillOnWeb({
+				composition: fixture(pixelated),
+				frame: 0,
+				inputProps: {},
+				licenseKey: 'free-license',
+				allowHtmlInCanvas: false,
+			})
+		).blob({format: 'png'});
+	const result = await compareNativePixels(
+		await render(false),
+		await render(true),
+	);
+	expect(result.mismatchedPixels).toBe(0);
+});
+
+// PR #13110: vector sources ignore this raster sampler, including scaled SVG crops.
+test('keeps vector SVG painting independent of the raster sampler', async () => {
+	const fixture = (pixelated: boolean) => ({
+		...svgUrlBlurredCover,
+		width: 160,
+		height: 160,
+		component: () => (
+			<AbsoluteFill style={{backgroundColor: 'white'}}>
+				<div
+					style={{
+						position: 'absolute',
+						left: 8,
+						top: 8,
+						width: 80,
+						height: 80,
+						transform: 'scale(1.5)',
+						transformOrigin: '0 0',
+						imageRendering: pixelated ? 'pixelated' : 'auto',
+					}}
+				>
+					<svgUrlBlurredCover.component />
+				</div>
+			</AbsoluteFill>
+		),
+	});
+	const render = async (pixelated: boolean) =>
+		(
+			await renderStillOnWeb({
+				composition: fixture(pixelated),
+				frame: 0,
+				inputProps: {},
+				licenseKey: 'free-license',
+				allowHtmlInCanvas: false,
+			})
+		).blob({format: 'png'});
+	const result = await compareNativePixels(
+		await render(false),
+		await render(true),
+	);
+	expect(result.mismatchedPixels).toBe(0);
+});
