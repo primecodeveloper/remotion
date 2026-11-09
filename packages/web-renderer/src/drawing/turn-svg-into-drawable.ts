@@ -1,4 +1,72 @@
 import {getEmbeddedFontStyleForSvg} from './embed-registered-fonts-in-svg';
+import {parseFontFamilies} from './parse-font-families';
+
+const textFontProperties = [
+	'font-family',
+	'font-size',
+	'font-style',
+	'font-weight',
+	'font-stretch',
+] as const;
+
+const getReferencedTemplates = (svg: SVGSVGElement) => {
+	const documentUrl = new URL(svg.ownerDocument.URL);
+	documentUrl.hash = '';
+	const templates = new Set<Element>();
+	for (const use of svg.querySelectorAll('use')) {
+		try {
+			const url = new URL(use.href.baseVal, use.baseURI);
+			const id = decodeURIComponent(url.hash.slice(1));
+			url.hash = '';
+			if (url.href !== documentUrl.href) continue;
+			const template = svg.getElementById(id);
+			if (template) templates.add(template);
+		} catch {
+			// Invalid authored references do not instantiate a template.
+			continue;
+		}
+	}
+
+	return templates;
+};
+
+// SVG images cannot load external font resources. Self-contained data fonts from
+// accessible stylesheets can be carried into the serialized SVG without fetching.
+const getCssDataFontRules = (svg: SVGSVGElement, fontFamilies: Set<string>) => {
+	const rules: string[] = [];
+	for (const sheet of svg.ownerDocument.styleSheets) {
+		if (
+			sheet.disabled ||
+			(sheet.media.mediaText && !matchMedia(sheet.media.mediaText).matches)
+		)
+			continue;
+		let cssRules: CSSRuleList;
+		try {
+			cssRules = sheet.cssRules;
+		} catch (error) {
+			if (error instanceof DOMException && error.name === 'SecurityError')
+				continue;
+			throw error;
+		}
+
+		for (const rule of cssRules) {
+			if (!(rule instanceof CSSFontFaceRule)) continue;
+			const family = parseFontFamilies(rule.style.fontFamily)[0];
+			if (!fontFamilies.has(family)) continue;
+			const src = rule.style.getPropertyValue('src');
+			// Keep only one self-contained source, without local/network fallbacks.
+			if (
+				!/^url\((?:"data:[^"]*"|'data:[^']*'|data:[^)]*)\)(?:\s+format\([^)]*\))?$/i.test(
+					src,
+				)
+			)
+				continue;
+			rules.push(rule.cssText);
+		}
+	}
+
+	return rules.join('');
+};
 
 const drawableBySvg = new WeakMap<
 	SVGSVGElement,
@@ -11,6 +79,26 @@ const drawableBySvg = new WeakMap<
 
 export const turnSvgIntoDrawable = (svg: SVGSVGElement) => {
 	const {fill, color, width, height} = getComputedStyle(svg);
+	const textElements = Array.from(
+		svg.querySelectorAll('text, tspan, textPath'),
+	);
+	const referencedTemplates = textElements.length
+		? getReferencedTemplates(svg)
+		: new Set<Element>();
+	const textStyles = textElements.map((element) => {
+		// Templates inherit font selection from each <use> instance.
+		if (element.closest('defs, symbol')) return null;
+		let ancestor: Element = element;
+		while (ancestor !== svg) {
+			if (referencedTemplates.has(ancestor)) return null;
+			ancestor = ancestor.parentElement!;
+		}
+
+		const style = getComputedStyle(element);
+		return textFontProperties.map((property) =>
+			style.getPropertyValue(property),
+		);
+	});
 
 	const originalStyle = svg.getAttribute('style');
 	const originalWidth = svg.getAttribute('width');
@@ -43,8 +131,46 @@ export const turnSvgIntoDrawable = (svg: SVGSVGElement) => {
 	svg.style.marginBottom = '0';
 	svg.style.fill = fill;
 	svg.style.color = color;
+	// External stylesheet rules disappear when the SVG becomes an image.
+	// Preserve resolved font selection without mutating mounted text elements.
+	const svgForSerialization =
+		textStyles.length === 0 ? svg : (svg.cloneNode(true) as SVGSVGElement);
+	svgForSerialization
+		.querySelectorAll<SVGTextContentElement>('text, tspan, textPath')
+		.forEach((element, index) => {
+			const fontStyle = textStyles[index];
+			if (fontStyle === null) return;
+			textFontProperties.forEach((property, propertyIndex) => {
+				element.style.setProperty(
+					property,
+					fontStyle[propertyIndex],
+					'important',
+				);
+			});
+		});
+	const fontFamilies = new Set(
+		textStyles.flatMap((style) => (style ? parseFontFamilies(style[0]) : [])),
+	);
+	const cssFontRules = textElements.length
+		? getCssDataFontRules(svg, fontFamilies)
+		: '';
+	if (cssFontRules) {
+		const existingStyle = svgForSerialization.querySelector('style');
+		if (existingStyle) {
+			// Adding a sibling would change authored nth-child/last-child selectors.
+			existingStyle.textContent = cssFontRules + existingStyle.textContent;
+		} else {
+			const style = svg.ownerDocument.createElementNS(
+				'http://www.w3.org/2000/svg',
+				'style',
+			);
+			style.textContent = cssFontRules;
+			svgForSerialization.prepend(style);
+		}
+	}
+
 	const serializedSvg = new XMLSerializer()
-		.serializeToString(svg)
+		.serializeToString(svgForSerialization)
 		// eslint-disable-next-line no-control-regex
 		.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
 
